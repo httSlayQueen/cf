@@ -1,7 +1,7 @@
 ## CF优选IP
 
 - **优选工具：** [xinyitang3/cfnb](https://github.com/xinyitang3/cfnb/tree/main) 
-- **测试网络：** 广东电信 
+- **测试网络：** 广东电信5G 
 - **订阅链接：** `https://raw.githubusercontent.com/httSlayQueen/cf/refs/heads/main/ip.txt`
 
 ---
