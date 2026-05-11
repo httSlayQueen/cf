@@ -164,6 +164,8 @@ def load_config():
             "IR", "KP", "LY", "MO", "NG", "NL", "PK", "RU", "SD", "SO",
             "SY", "TH", "TW", "UA", "VE", "VN", "YE", "ZW"
         ],
+        "DNS_IP_RISK_FILTER_ENABLED": False,
+        "DNS_IP_RISK_MAX_LEVEL": "高风险",
         "DNS_UPDATE_TARGET_COUNT": 15,
         "BANDWIDTH_SIZE_MB": 0.5,
         "BANDWIDTH_TIMEOUT": 3,
@@ -173,8 +175,8 @@ def load_config():
         "BANDWIDTH_PROCESS_BUFFER": 2,
         "BANDWIDTH_CONNECT_TIMEOUT": 3,
         "MAX_WORKERS": 200,
-        "AVAILABILITY_WORKERS": 10,
-        "FALLBACK_WORKERS": 10,
+        "AVAILABILITY_WORKERS": 32,
+        "FALLBACK_WORKERS": 32,
         "BANDWIDTH_WORKERS": 10,
         "DNS_UPDATE_MAX_RETRIES": 3,
         "DNS_UPDATE_RETRY_DELAY": 3,
@@ -227,6 +229,7 @@ CF_TTL = cfg["CF_TTL"]
 CF_PROXIED = cfg["CF_PROXIED"]
 CF_DNS_CONNECT_TIMEOUT = cfg["CF_DNS_CONNECT_TIMEOUT"]
 CF_DNS_READ_TIMEOUT = cfg["CF_DNS_READ_TIMEOUT"]
+ADDITIONAL_SOURCES = cfg["ADDITIONAL_SOURCES"]
 FETCH_MAX_RETRIES = cfg["FETCH_MAX_RETRIES"]
 FETCH_RETRY_DELAY = cfg["FETCH_RETRY_DELAY"]
 FETCH_TIMEOUT = cfg["FETCH_TIMEOUT"]
@@ -243,6 +246,8 @@ AVAILABILITY_RETRY_DELAY = cfg["AVAILABILITY_RETRY_DELAY"]
 FILTER_IPV6_AVAILABILITY = cfg["FILTER_IPV6_AVAILABILITY"]
 FILTER_BLOCKED_COUNTRIES_ENABLED = cfg["FILTER_BLOCKED_COUNTRIES_ENABLED"]
 BLOCKED_COUNTRIES = cfg["BLOCKED_COUNTRIES"]
+DNS_IP_RISK_FILTER_ENABLED = cfg["DNS_IP_RISK_FILTER_ENABLED"]
+DNS_IP_RISK_MAX_LEVEL = cfg["DNS_IP_RISK_MAX_LEVEL"]
 DNS_UPDATE_TARGET_COUNT = cfg["DNS_UPDATE_TARGET_COUNT"]
 BANDWIDTH_SIZE_MB = cfg["BANDWIDTH_SIZE_MB"]
 BANDWIDTH_TIMEOUT = cfg["BANDWIDTH_TIMEOUT"]
@@ -296,6 +301,69 @@ def send_wxpusher_notification(content, summary):
     except Exception as e:
         print(f"⚠️ 微信通知异常: {e}")
 
+# ==================== IP 风险等级查询 ====================
+RISK_LEVEL_ORDER = {
+    "极度纯净": 0,
+    "纯净": 1,
+    "轻微风险": 2,
+    "高风险": 3,
+    "极度危险": 4,
+}
+
+def get_ip_risk_level(ip):
+    """查询单个 IP 的风险等级字符串，失败返回 '未知'"""
+    url = f"https://api.ipapi.is/?q={ip}"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return "未知"
+
+    company_score = data.get("company", {}).get("abuser_score")
+    asn_score = data.get("asn", {}).get("abuser_score")
+    security_flags = {
+        "is_crawler": data.get("is_crawler", False),
+        "is_proxy": data.get("is_proxy", False),
+        "is_vpn": data.get("is_vpn", False),
+        "is_tor": data.get("is_tor", False),
+        "is_abuser": data.get("is_abuser", False),
+        "is_bogon": data.get("is_bogon", False),
+    }
+
+    def extract_score(score_str):
+        if not score_str:
+            return 0.0
+        match = re.match(r"([\d.]+)\s*\(([^)]+)\)", str(score_str).strip())
+        if match:
+            return float(match.group(1))
+        try:
+            return float(score_str)
+        except (ValueError, TypeError):
+            return 0.0
+
+    company = extract_score(company_score)
+    asn = extract_score(asn_score)
+    base_score = ((company + asn) / 2) * 5
+
+    risk_count = sum(1 for key in ["is_crawler", "is_proxy", "is_vpn", "is_tor", "is_abuser"]
+                     if security_flags.get(key, False))
+    final_score = base_score + risk_count * 0.15
+    if security_flags.get("is_bogon", False):
+        final_score += 1.0
+
+    percentage = final_score * 100
+    if percentage >= 100:
+        return "极度危险"
+    elif percentage >= 20:
+        return "高风险"
+    elif percentage >= 5:
+        return "轻微风险"
+    elif percentage >= 0.25:
+        return "纯净"
+    else:
+        return "极度纯净"
+
 # ==================== 自适应多数据源解析引擎 ====================
 def extract_country_code(label):
     """从任意标签中提取标准两位国家代码（支持纯代码、中文名、emoji国旗、混合无关文字）"""
@@ -307,16 +375,13 @@ def extract_country_code(label):
 
     # 1. 优先找标准两位大写字母代码
     for token in tokens:
-        # 清理 token 开头常见的非字母噪音 (数字、空格、短横、点、下划线、竖线、井号等)
         token_cleaned = re.sub(r'^[\d\s\-_.|#]+', '', token.strip())
         if re.match(r'^[A-Z]{2}$', token_cleaned):
             return token_cleaned
 
     # 2. 对每个 token 尝试提取中文名
     for token in tokens:
-        # --- 移除 token 开头常见的非中文噪音 (数字、符号等) ---
         token_cleaned = re.sub(r'^[\d\s\-_.|#]+', '', token)
-        # ----------------------------------------------------------------
         token_no_emoji = re.sub(r'[\U0001F1E6-\U0001F1FF]', '', token_cleaned).strip()
         cn_match = re.match(r'^([\u4e00-\u9fff（）()]+)\d*$', token_no_emoji)
         if cn_match:
@@ -359,10 +424,9 @@ def _parse_json_nodes(data):
 
 def _query_country(ip, port):
     """通过已有的可用性检测 API 查询 IP 的国家代码"""
-    api_url = cfg.get("AVAILABILITY_CHECK_API", "https://api.090227.xyz/check")
     try:
         resp = requests.get(
-            api_url,
+            AVAILABILITY_CHECK_API,
             params={"proxyip": f"{ip}:{port}"},
             timeout=(AVAILABILITY_CONNECT_TIMEOUT, AVAILABILITY_TIMEOUT)
         )
@@ -464,12 +528,9 @@ def fetch_additional_source(url):
     if not url:
         return []
 
-    max_retries = FETCH_MAX_RETRIES
-    retry_delay = FETCH_RETRY_DELAY
-
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, FETCH_MAX_RETRIES + 1):
         try:
-            print(f"正在请求数据源 {url} (尝试 {attempt}/{max_retries}) ...")
+            print(f"正在请求数据源 {url} (尝试 {attempt}/{FETCH_MAX_RETRIES}) ...")
             resp = requests.get(url, timeout=(FETCH_CONNECT_TIMEOUT, FETCH_TIMEOUT))
             resp.raise_for_status()
             nodes = parse_adaptive(resp.text)
@@ -477,14 +538,14 @@ def fetch_additional_source(url):
             return nodes
         except Exception as e:
             print(f"请求或解析失败 ({url}): {e}")
-            if attempt < max_retries:
-                print(f"等待 {retry_delay} 秒后重试...")
-                time.sleep(retry_delay)
+            if attempt < FETCH_MAX_RETRIES:
+                print(f"等待 {FETCH_RETRY_DELAY} 秒后重试...")
+                time.sleep(FETCH_RETRY_DELAY)
             else:
-                print(f"已尝试 {max_retries} 次，放弃该数据源。")
+                print(f"已尝试 {FETCH_MAX_RETRIES} 次，放弃该数据源。")
                 return []
 
-# =========================== 原有测试、测速、DNS、GitHub 等函数保持不变 ===========================
+# =========================== 核心测试、筛选、测速及更新函数 ===========================
 
 def test_tcp_latency(ip, port, timeout=TIMEOUT, probes=TCP_PROBES):
     min_latency = float("inf")
@@ -658,23 +719,26 @@ def bandwidth_filter(candidates):
     return results
 
 def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, target_count=None, latency_map=None):
-    if not cfg.get("CF_ENABLED", False):
+    if not CF_ENABLED:
         print("Cloudflare DNS 批量更新未启用。")
         return
 
     if target_count is None:
-        target_count = cfg.get("DNS_UPDATE_TARGET_COUNT", 15)
+        target_count = DNS_UPDATE_TARGET_COUNT
 
     dns_ip_list = []
     dns_node_list = []
     filtered_by_port = 0
     filtered_by_ipv6 = 0
     filtered_by_country = 0
+    filtered_by_risk = 0
+    risk_fallback_ip_list = []
+    risk_fallback_node_list = []
 
     if full_bw_results and ip_info:
         blocked_set = set()
-        if cfg.get("FILTER_BLOCKED_COUNTRIES_ENABLED", False):
-            blocked_set = {c.upper() for c in cfg.get("BLOCKED_COUNTRIES", [])}
+        if FILTER_BLOCKED_COUNTRIES_ENABLED:
+            blocked_set = {c.upper() for c in BLOCKED_COUNTRIES}
 
         for node_str, speed in full_bw_results:
             if ':' in node_str:
@@ -683,7 +747,7 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
                     filtered_by_port += 1
                     continue
 
-            if cfg.get("FILTER_IPV6_AVAILABILITY", False):
+            if FILTER_IPV6_AVAILABILITY:
                 stack = ip_info.get(node_str, "unknown")
                 if stack == "ipv6_only":
                     filtered_by_ipv6 += 1
@@ -695,20 +759,46 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
                     filtered_by_country += 1
                     continue
 
-            pure_ip = node_str.split(':')[0]
+            pure_ip = node_str.split(':')[0]   # 提前提取，供备份和后续使用
+
+            # 备份未经过风险过滤的节点（用于回退）
+            if DNS_IP_RISK_FILTER_ENABLED:
+                risk_fallback_ip_list.append(pure_ip)
+                risk_fallback_node_list.append(node_str)
+
+            # IP 风险等级过滤（仅 DNS 环节）
+            if DNS_IP_RISK_FILTER_ENABLED:
+                risk_level = get_ip_risk_level(pure_ip)
+                max_level = DNS_IP_RISK_MAX_LEVEL
+                if risk_level == "未知" or RISK_LEVEL_ORDER.get(risk_level, 99) > RISK_LEVEL_ORDER.get(max_level, 2):
+                    filtered_by_risk += 1
+                    continue
+
             dns_ip_list.append(pure_ip)
             dns_node_list.append(node_str)
 
             if len(dns_ip_list) >= target_count:
                 break
 
+        # 风险等级检测全部失败通知
+        if DNS_IP_RISK_FILTER_ENABLED and not dns_ip_list and filtered_by_risk > 0:
+            send_wxpusher_notification(
+                content="风险等级检测全部失败：所有候选节点均因风险等级过高或 API 查询失败被过滤，已回退到无风险等级过滤的候选列表。",
+                summary="风险等级检测全部失败"
+            )
+            # 回退到未经过风险过滤的列表（仅经过端口、IPv6、国家过滤）
+            dns_ip_list = risk_fallback_ip_list[:target_count]
+            dns_node_list = risk_fallback_node_list[:target_count]
+
         filter_parts = []
         if filtered_by_port > 0:
             filter_parts.append(f"非443端口过滤({filtered_by_port}个)")
-        if cfg.get("FILTER_IPV6_AVAILABILITY", False):
+        if FILTER_IPV6_AVAILABILITY:
             filter_parts.append(f"IPv6落地过滤({filtered_by_ipv6}个)")
-        if cfg.get("FILTER_BLOCKED_COUNTRIES_ENABLED", False):
+        if FILTER_BLOCKED_COUNTRIES_ENABLED:
             filter_parts.append(f"DNS黑名单过滤({filtered_by_country}个)")
+        if DNS_IP_RISK_FILTER_ENABLED and filtered_by_risk > 0:
+            filter_parts.append(f"风险等级过滤({filtered_by_risk}个)")
         filter_str = " + ".join(filter_parts) if filter_parts else "无过滤"
         print(f"从 {len(full_bw_results)} 个测速节点中筛选出 {len(dns_ip_list)} 个节点用于 DNS 更新（{filter_str}）。")
 
@@ -749,21 +839,14 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
             print(f"{i}. {ip} 速度 {speed:.2f} Mbps")
 
     headers = {
-        "Authorization": f"Bearer {cfg['CF_API_TOKEN']}",
+        "Authorization": f"Bearer {CF_API_TOKEN}",
         "Content-Type": "application/json"
     }
-    zone_id = cfg['CF_ZONE_ID']
-    record_name = cfg['CF_DNS_RECORD_NAME']
-    ttl = cfg.get('CF_TTL', 120)
-    proxied = cfg.get('CF_PROXIED', False)
 
-    max_retries = cfg.get('DNS_UPDATE_MAX_RETRIES', 5)
-    retry_delay = cfg.get('DNS_UPDATE_RETRY_DELAY', 10)
-
-    for attempt in range(1, max_retries + 1):
-        print(f"\n[DNS 更新] 尝试 {attempt}/{max_retries}...")
+    for attempt in range(1, DNS_UPDATE_MAX_RETRIES + 1):
+        print(f"\n[DNS 更新] 尝试 {attempt}/{DNS_UPDATE_MAX_RETRIES}...")
         try:
-            list_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records?type=A&name={record_name}"
+            list_url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records?type=A&name={CF_DNS_RECORD_NAME}"
             response = requests.get(list_url, headers=headers, timeout=(CF_DNS_CONNECT_TIMEOUT, CF_DNS_READ_TIMEOUT))
             response.raise_for_status()
             result = response.json()
@@ -775,16 +858,16 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
             deletes = [{"id": rec["id"]} for rec in existing_records]
             posts = [
                 {
-                    "name": record_name,
+                    "name": CF_DNS_RECORD_NAME,
                     "type": "A",
                     "content": ip,
-                    "ttl": ttl,
-                    "proxied": proxied
+                    "ttl": CF_TTL,
+                    "proxied": CF_PROXIED
                 }
                 for ip in dns_ip_list
             ]
 
-            batch_url = f"https://api.cloudflare.com/client/v4/zones/{zone_id}/dns_records/batch"
+            batch_url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/batch"
             payload = {"deletes": deletes, "posts": posts}
             response = requests.post(batch_url, headers=headers, json=payload, timeout=(CF_DNS_CONNECT_TIMEOUT, CF_DNS_READ_TIMEOUT))
             response.raise_for_status()
@@ -793,19 +876,19 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
                 error_detail = result.get('errors')
                 raise Exception(f"批量更新失败: {error_detail}")
 
-            success_msg = f"✅ Cloudflare DNS 批量更新成功！已将 {record_name} 指向 {len(dns_ip_list)} 个 IP。"
+            success_msg = f"✅ Cloudflare DNS 批量更新成功！已将 {CF_DNS_RECORD_NAME} 指向 {len(dns_ip_list)} 个 IP。"
             print(success_msg)
             print("   注意：DNS 解析将随机返回这些 IP 中的一个，实现负载均衡。")
             return
 
         except Exception as e:
-            error_msg = f"[尝试 {attempt}/{max_retries}] DNS 更新出错: {e}"
+            error_msg = f"[尝试 {attempt}/{DNS_UPDATE_MAX_RETRIES}] DNS 更新出错: {e}"
             print(error_msg)
-            if attempt < max_retries:
-                print(f"等待 {retry_delay} 秒后重试...")
-                time.sleep(retry_delay)
+            if attempt < DNS_UPDATE_MAX_RETRIES:
+                print(f"等待 {DNS_UPDATE_RETRY_DELAY} 秒后重试...")
+                time.sleep(DNS_UPDATE_RETRY_DELAY)
             else:
-                final_error = f"❌ Cloudflare DNS 更新失败，已重试 {max_retries} 次，错误：{e}"
+                final_error = f"❌ Cloudflare DNS 更新失败，已重试 {DNS_UPDATE_MAX_RETRIES} 次，错误：{e}"
                 print(final_error)
                 send_wxpusher_notification(content=final_error, summary="DNS 更新失败")
 
@@ -832,12 +915,8 @@ def sync_to_github():
         except Exception:
             pass
 
-    max_retries = cfg.get('GITHUB_SYNC_MAX_RETRIES', 5)
-    retry_delay = cfg.get('GITHUB_SYNC_RETRY_DELAY', 10)
-    process_timeout = cfg.get('GIT_SYNC_PROCESS_TIMEOUT', 180)
-
-    for attempt in range(1, max_retries + 1):
-        print(f"\n正在同步到 GitHub (尝试 {attempt}/{max_retries})...")
+    for attempt in range(1, GITHUB_SYNC_MAX_RETRIES + 1):
+        print(f"\n正在同步到 GitHub (尝试 {attempt}/{GITHUB_SYNC_MAX_RETRIES})...")
         try:
             cmd = interpreter + [script_path]
             process = subprocess.Popen(
@@ -849,7 +928,7 @@ def sync_to_github():
             )
 
             try:
-                stdout, stderr = process.communicate(timeout=process_timeout)
+                stdout, stderr = process.communicate(timeout=GIT_SYNC_PROCESS_TIMEOUT)
                 if process.returncode == 0:
                     print("✅ 已自动推送到 GitHub。")
                     return
@@ -859,19 +938,19 @@ def sync_to_github():
                         print(f"错误信息: {stderr.strip()}")
             except subprocess.TimeoutExpired:
                 process.kill()
-                print(f"❌ 推送超时（超过 {process_timeout} 秒）")
+                print(f"❌ 推送超时（超过 {GIT_SYNC_PROCESS_TIMEOUT} 秒）")
         except Exception as e:
             print(f"❌ 推送过程异常: {e}")
 
-        if attempt < max_retries:
-            print(f"等待 {retry_delay} 秒后重试...")
-            time.sleep(retry_delay)
+        if attempt < GITHUB_SYNC_MAX_RETRIES:
+            print(f"等待 {GITHUB_SYNC_RETRY_DELAY} 秒后重试...")
+            time.sleep(GITHUB_SYNC_RETRY_DELAY)
 
     send_wxpusher_notification(
-        content=f"GitHub 推送失败，已重试 {max_retries} 次，请检查网络或仓库状态。",
+        content=f"GitHub 推送失败，已重试 {GITHUB_SYNC_MAX_RETRIES} 次，请检查网络或仓库状态。",
         summary="GitHub 推送失败"
     )
-    print(f"⚠️ 已尝试 {max_retries} 次推送，均失败，请检查网络或 GitHub 仓库状态。")
+    print(f"⚠️ 已尝试 {GITHUB_SYNC_MAX_RETRIES} 次推送，均失败，请检查网络或 GitHub 仓库状态。")
 
 def write_ip_txt(final_nodes, output_file,
                  header_enabled, header_lines,
@@ -898,14 +977,14 @@ def main():
     print(f"IP 可用性二次筛选：{'启用' if TEST_AVAILABILITY else '禁用'}（仅对候选节点）")
     print(f"IPv6 客户端 IP 过滤（仅作用于DNS更新环节）：{'启用' if FILTER_IPV6_AVAILABILITY else '禁用'}")
     print(f"DNS黑名单过滤：{'启用' if FILTER_BLOCKED_COUNTRIES_ENABLED else '禁用'}，黑名单国家：{', '.join(BLOCKED_COUNTRIES)}")
+    print(f"IP 风险等级过滤：{'启用' if DNS_IP_RISK_FILTER_ENABLED else '禁用'}（最高允许：{DNS_IP_RISK_MAX_LEVEL}）")
     print(f"带宽测速候选数：{BANDWIDTH_CANDIDATES}，测速文件大小：{BANDWIDTH_SIZE_MB} MB，超时：{BANDWIDTH_TIMEOUT}s")
     if FILTER_COUNTRIES_ENABLED:
         print(f"前置白名单过滤：启用，仅保留：{', '.join(ALLOWED_COUNTRIES)}")
 
     # 统一从 ADDITIONAL_SOURCES 加载所有数据源
     nodes = []
-    additional_sources = cfg.get("ADDITIONAL_SOURCES", [])
-    for source in additional_sources:
+    for source in ADDITIONAL_SOURCES:
         if not source.get("enabled", True):
             continue
         url = source.get("url")
@@ -923,7 +1002,7 @@ def main():
                     nodes.append(n)
     print(f"合并后总计 {len(nodes)} 个节点。")
 
-    # 前置端口过滤（TCP 测试前仅保留指定端口的节点）
+    # 前置端口过滤
     if PRE_FILTER_PORT_ENABLED:
         before = len(nodes)
         nodes = [n for n in nodes if n.split(':')[1].split('#')[0] in PRE_FILTER_PORTS]
@@ -934,7 +1013,7 @@ def main():
             print("⚠️ 前置端口过滤后无任何节点，退出程序。")
             sys.exit(0)
 
-    # 前置黑名单过滤（TCP测试前剔除指定国家）
+    # 前置黑名单过滤
     if PRE_FILTER_BLOCKED_ENABLED and PRE_FILTER_BLOCKED_COUNTRIES:
         before = len(nodes)
         blocked_set = set(PRE_FILTER_BLOCKED_COUNTRIES)
@@ -1062,18 +1141,17 @@ def main():
             if lat_sec != float('inf'):
                 print(f"{i}. {node} 速度 {speed:.2f} Mbps 延迟 {lat_sec*1000:.2f} ms")
                 final_selected[i-1] = node + f" [{speed:.2f} Mbps|{lat_sec*1000:.2f} ms]"
+                final_selected[i-1] = node + f" [{speed:.2f} Mbps|{lat_sec*1000:.2f} ms]"  #在行末加入测速结果
             else:
                 print(f"{i}. {node} 速度 {speed:.2f} Mbps")
-                final_selected[i-1] = node + f" [{speed:.2f} Mbps]"
+                final_selected[i-1] = node + f" [{speed:.2f} Mbps]"  #在行末加入测速结果
 
-    # 使用广告配置生成 ip.txt
     write_ip_txt(final_selected, OUTPUT_FILE,
                  AD_HEADER_ENABLED, AD_HEADER_LINES,
                  AD_FOOTER_ENABLED, AD_FOOTER_LINES,
                  AD_PERLINE_ENABLED, AD_PERLINE_TEXT)
     print(f"\n结果已保存到 {OUTPUT_FILE}（共 {len(final_selected)} 个节点）")
 
-    # IP 列表直接从最终节点提取，避免广告行干扰 DNS 更新
     ip_list = [node.split(':')[0] for node in final_selected]
 
     batch_update_cloudflare_dns(
@@ -1089,13 +1167,11 @@ def main():
 if __name__ == "__main__":
     import atexit
 
-    # 读取配置
-    enable_log = cfg.get("ENABLE_LOGGING", False)
-    log_filename = cfg.get("LOG_FILE", "cfnb.log")
+    enable_log = ENABLE_LOGGING
+    log_filename = LOG_FILE
 
     if enable_log:
         try:
-            # 使用绝对路径，确保写入脚本所在目录
             script_dir = os.path.dirname(os.path.abspath(__file__))
             log_path = os.path.join(script_dir, log_filename)
             log_f = open(log_path, "w", encoding="utf-8")
@@ -1116,7 +1192,6 @@ if __name__ == "__main__":
                         f.flush()
             sys.stdout = _Tee(sys.stdout, log_f)
 
-            # 确保退出时关闭日志文件
             def _close_log():
                 try:
                     sys.stdout = sys.__stdout__
