@@ -1140,7 +1140,6 @@ def main():
             lat_sec = latency_map.get(node, float('inf'))
             if lat_sec != float('inf'):
                 print(f"{i}. {node} 速度 {speed:.2f} Mbps 延迟 {lat_sec*1000:.2f} ms")
-                final_selected[i-1] = node + f" [{speed:.2f} Mbps|{lat_sec*1000:.2f} ms]"
                 final_selected[i-1] = node + f" [{speed:.2f} Mbps|{lat_sec*1000:.2f} ms]"  #在行末加入测速结果
             else:
                 print(f"{i}. {node} 速度 {speed:.2f} Mbps")
