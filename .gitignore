@@ -1,4 +1,5 @@
+__pycache__/
 config.json
 git_sync.sh
+main.py
 update_fork.sh
-__pycache__/
