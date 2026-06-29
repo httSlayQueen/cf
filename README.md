@@ -34,6 +34,28 @@
 
 ---
 
+## VPS 工具
+
+1. **只允许Cloudflare的IP访问443端口**：cf_ipset.sh
+
+```
+apt update && apt install -y wget ufw ipset
+wget -O cf_ipset.sh "https://github.com/httSlayQueen/cf/raw/refs/heads/main/cf_ipset.sh" && chmod +x cf_ipset.sh && ./cf_ipset.sh
+```
+
+2. **使用自编译BBR内核**：tcpx-custom.sh
+
+> 使用方式：运行命令，选择【1】“安装 BBR自编译内核”
+> 
+> 源项目：https://github.com/ylx2016/Linux-NetSpeed
+
+```
+apt update && apt install -y wget ca-certificates wget && update-ca-certificates
+wget -O tcpx-custom.sh "https://github.com/httSlayQueen/cf/raw/refs/heads/main/tcpx-custom.sh" && chmod +x tcpx-custom.sh && ./tcpx-custom.sh
+```
+
+---
+
 ### 参考
 
 [HandsomeMJZ/cfip](https://github.com/HandsomeMJZ/cfip)
