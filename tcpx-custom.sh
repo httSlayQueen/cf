@@ -5,9 +5,16 @@
 # 源项目：https://github.com/ylx2016/Linux-NetSpeed.git
 #
 
+# Github 项目名称
+CUSTOM_REPO="httSlayQueen/vps-kernel"
+
+# 下载 tcp.sh
 wget -O tcpx.sh "https://github.com/ylx2016/Linux-NetSpeed/raw/master/tcpx.sh" && chmod +x tcpx.sh
 
-sed -e 's,get_github_asset \"ylx2016/kernel\",get_github_asset \"httSlayQueen/vps-kernel\",g' \
+# 修改目的地址
+sed -e "s,get_github_asset \"ylx2016/kernel\",get_github_asset \"${CUSTOM_REPO}\",g" \
+    -e "s,正在向 Github/ylx2016,正在向 Github/${CUSTOM_REPO},g" \
     -i.bak ./tcpx.sh
 
+# 运行
 ./tcpx.sh
