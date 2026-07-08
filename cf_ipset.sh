@@ -71,14 +71,14 @@ fi
 
 #ufw设置，如果要新增，记得先到对应文件删除，否则if逻辑不通不能添加
 if [ -s "$CONF_V4" ]; then
-    if ! grep -qx ".*-A ufw-before-input -p tcp --dport 443 -m set --match-set cfv4 src -j ACCEPT" /etc/ufw/before.rules; then
-        sed -i '/^COMMIT$/i -A ufw-before-input -p tcp --dport 443 -m set --match-set cfv4 src -j ACCEPT' /etc/ufw/before.rules
+    if ! grep -qx ".*-A ufw-after-input -p tcp --dport 443 -m set --match-set cfv4 src -j ACCEPT" /etc/ufw/after.rules; then
+        sed -i '/^COMMIT$/i -A ufw-after-input -p tcp --dport 443 -m set --match-set cfv4 src -j ACCEPT' /etc/ufw/after.rules
         echo -e "IPv4规则已成功集成到ufw"
     fi
 fi
 if [ -s "$CONF_V6" ]; then
-    if ! grep -qx ".*-A ufw6-before-input -p tcp --dport 443 -m set --match-set cfv6 src -j ACCEPT" /etc/ufw/before6.rules; then
-        sed -i '/^COMMIT$/i -A ufw6-before-input -p tcp --dport 443 -m set --match-set cfv6 src -j ACCEPT' /etc/ufw/before6.rules
+    if ! grep -qx ".*-A ufw6-after-input -p tcp --dport 443 -m set --match-set cfv6 src -j ACCEPT" /etc/ufw/after6.rules; then
+        sed -i '/^COMMIT$/i -A ufw6-after-input -p tcp --dport 443 -m set --match-set cfv6 src -j ACCEPT' /etc/ufw/after6.rules
         echo -e "IPv6规则已成功集成到ufw"
     fi
 fi
