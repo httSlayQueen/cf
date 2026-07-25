@@ -55,7 +55,7 @@ else
     ipset flush cfv6
 fi
 
-#添加到ipset
+#保存ipset
 if [ -s "$LIST_V4" ]; then
     sed 's/^/add cfv4 /' "$LIST_V4" | ipset restore -!
     ##单独保存IPv4规则
@@ -85,11 +85,14 @@ fi
 
 #写入启动脚本，并添加执行权限
 TAB="    "
+TEXT_CLEAN="${TAB}ipset destroy"
 TEXT_V4="${TAB}ipset restore -f ${CONF_V4}"
 TEXT_V6="${TAB}ipset restore -f ${CONF_V6}"
-if ! grep -q "$TEXT_V4" /etc/ufw/before.init; then
-    sed -i.bak "/^[^#]*start)/a\\$TEXT_V4" /etc/ufw/before.init
-    sed -i.bak "/^[^#]*start)/a\\$TEXT_V6" /etc/ufw/before.init
+if ! grep -q "$TEXT_CLEAN" /etc/ufw/before.init; then
+    sed -e "/^[^#]*start)/a\\$TEXT_CLEAN" \
+		-e "/^[^#]*start)/a\\$TEXT_V4" \
+		-e "/^[^#]*start)/a\\$TEXT_V6" \
+		-i.bak /etc/ufw/before.init
     echo -e "ufw启动脚本写入完成"
 else
     echo -e "跳过修改ufw启动脚本"
