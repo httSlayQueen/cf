@@ -72,22 +72,22 @@ fi
 #ufw设置，如果要新增，记得先到对应文件删除，否则if逻辑不通不能添加
 if [ -s "$CONF_V4" ]; then
     if ! grep -qx ".*-A ufw-after-input -p tcp --dport 443 -m set --match-set cfv4 src -j ACCEPT" /etc/ufw/after.rules; then
-        sed -i '/^COMMIT$/i -A ufw-after-input -p tcp --dport 443 -m set --match-set cfv4 src -j ACCEPT' /etc/ufw/after.rules
+        sed -i.bak '/^COMMIT$/i -A ufw-after-input -p tcp --dport 443 -m set --match-set cfv4 src -j ACCEPT' /etc/ufw/after.rules
         echo -e "IPv4规则已成功集成到ufw"
     fi
 fi
 if [ -s "$CONF_V6" ]; then
     if ! grep -qx ".*-A ufw6-after-input -p tcp --dport 443 -m set --match-set cfv6 src -j ACCEPT" /etc/ufw/after6.rules; then
-        sed -i '/^COMMIT$/i -A ufw6-after-input -p tcp --dport 443 -m set --match-set cfv6 src -j ACCEPT' /etc/ufw/after6.rules
+        sed -i.bak '/^COMMIT$/i -A ufw6-after-input -p tcp --dport 443 -m set --match-set cfv6 src -j ACCEPT' /etc/ufw/after6.rules
         echo -e "IPv6规则已成功集成到ufw"
     fi
 fi
 
 #写入启动脚本，并添加执行权限
 TAB="    "
-TEXT_CLEAN="${TAB}ipset destroy"
-TEXT_V4="${TAB}ipset restore -f ${CONF_V4}"
-TEXT_V6="${TAB}ipset restore -f ${CONF_V6}"
+TEXT_CLEAN="${TAB}ipset destroy 2>/dev/null || true"
+TEXT_V4="${TAB}ipset restore -f ${CONF_V4} 2>/dev/null || true"
+TEXT_V6="${TAB}ipset restore -f ${CONF_V6} 2>/dev/null || true"
 if ! grep -q "$TEXT_CLEAN" /etc/ufw/before.init; then
     sed -e "/^[^#]*start)/a\\$TEXT_CLEAN" \
 		-e "/^[^#]*start)/a\\$TEXT_V4" \
@@ -97,7 +97,7 @@ if ! grep -q "$TEXT_CLEAN" /etc/ufw/before.init; then
 else
     echo -e "跳过修改ufw启动脚本"
 fi
-chmod +x /etc/ufw/before.init
+chmod a+x /etc/ufw/before.init
 
 ufw reload
 iptables -vnL | grep cfv4
